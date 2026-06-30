@@ -235,9 +235,19 @@ fn build_args(request: &PtyStart) -> Vec<String> {
 
 fn detect_prompt(text: &str) -> Option<PromptKind> {
     let lower = text.to_lowercase();
-    if lower.contains("enter password") {
+    if lower.contains("enter password")
+        || lower.contains("password:")
+        || lower.trim_end().ends_with("password")
+        || lower.contains("app-specific password")
+    {
         Some(PromptKind::Password)
-    } else if lower.contains("enter 2fa") || lower.contains("auth code") {
+    } else if lower.contains("enter 2fa")
+        || lower.contains("2fa")
+        || lower.contains("two-factor")
+        || lower.contains("verification code")
+        || lower.contains("auth code")
+        || lower.contains("code:")
+    {
         Some(PromptKind::TwoFactor)
     } else {
         None
@@ -269,7 +279,15 @@ mod tests {
             Some(PromptKind::Password)
         ));
         assert!(matches!(
+            detect_prompt("Password:"),
+            Some(PromptKind::Password)
+        ));
+        assert!(matches!(
             detect_prompt("enter 2FA code:"),
+            Some(PromptKind::TwoFactor)
+        ));
+        assert!(matches!(
+            detect_prompt("Verification code:"),
             Some(PromptKind::TwoFactor)
         ));
     }

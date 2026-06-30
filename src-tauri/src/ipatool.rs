@@ -118,6 +118,7 @@ pub fn refresh_auth_info_inner(binary_path: &str) -> Result<AuthState, IpaToolEr
             .get("name")
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned),
+        country_code: country_code_from_auth_json(&output.json),
         error: None,
         diagnostic: Some(output.diagnostic),
     })
@@ -196,6 +197,39 @@ fn command_error_message(diagnostic: &CommandDiagnostic) -> String {
     )
 }
 
+fn country_code_from_auth_json(value: &serde_json::Value) -> Option<String> {
+    const KEYS: &[&str] = &[
+        "countryCode",
+        "country_code",
+        "country",
+        "storefrontCountryCode",
+        "storefront_country_code",
+        "storeCountryCode",
+        "store_country_code",
+    ];
+
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in KEYS {
+                if let Some(country) = object.get(*key).and_then(country_code_value) {
+                    return Some(country);
+                }
+            }
+            object.values().find_map(country_code_from_auth_json)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(country_code_from_auth_json),
+        _ => None,
+    }
+}
+
+fn country_code_value(value: &serde_json::Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    if text.len() == 2 && text.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return Some(text.to_ascii_lowercase());
+    }
+    None
+}
+
 fn redact_arg(arg: &str) -> String {
     if looks_sensitive(arg) {
         "<redacted>".to_string()
@@ -240,5 +274,23 @@ mod tests {
         assert!(output.contains("user@example.com"));
         assert!(!output.contains("secret"));
         assert!(!output.contains("123"));
+    }
+
+    #[test]
+    fn extracts_country_code_from_auth_json_variants() {
+        assert_eq!(
+            country_code_from_auth_json(&serde_json::json!({ "countryCode": "TR" })),
+            Some("tr".to_string())
+        );
+        assert_eq!(
+            country_code_from_auth_json(
+                &serde_json::json!({ "account": { "storeCountryCode": "ng" } })
+            ),
+            Some("ng".to_string())
+        );
+        assert_eq!(
+            country_code_from_auth_json(&serde_json::json!({ "storefront": "143441" })),
+            None
+        );
     }
 }

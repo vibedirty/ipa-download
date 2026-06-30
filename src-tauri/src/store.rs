@@ -1,6 +1,10 @@
 use crate::ipatool::{detect_binary_at_path, run_json_command_inner, CommandDiagnostic};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use uuid::Uuid;
@@ -20,9 +24,16 @@ pub enum StoreError {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
     pub binary_path: Option<String>,
+    #[serde(default)]
     pub selected_account_id: Option<String>,
+    #[serde(default)]
+    pub download_dir: Option<String>,
+    #[serde(default)]
     pub accounts: Vec<AccountProfile>,
+    #[serde(default)]
+    pub download_history: Vec<DownloadHistoryItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +45,27 @@ pub struct AccountProfile {
     pub default_download_dir: String,
     pub notes: String,
     pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadHistoryItem {
+    pub id: String,
+    pub app_name: String,
+    pub bundle_id: String,
+    #[serde(default)]
+    pub app_icon_url: Option<String>,
+    #[serde(default)]
+    pub version_name: Option<String>,
+    #[serde(default)]
+    pub external_version_id: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub account_email: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+    pub downloaded_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +92,8 @@ pub struct AuthState {
     pub signed_in: bool,
     pub email: Option<String>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub country_code: Option<String>,
     pub error: Option<String>,
     pub diagnostic: Option<CommandDiagnostic>,
 }
@@ -70,6 +104,7 @@ impl AuthState {
             signed_in: false,
             email: None,
             name: None,
+            country_code: None,
             error: Some(message.into()),
             diagnostic: None,
         }
@@ -82,6 +117,7 @@ impl AuthState {
             signed_in: false,
             email: None,
             name: None,
+            country_code: None,
             error: Some(message),
             diagnostic,
         }
@@ -125,6 +161,16 @@ pub fn set_binary_path_inner(app: &AppHandle, path: String) -> Result<BinaryStat
     Ok(status)
 }
 
+pub fn set_download_dir_inner(
+    app: &AppHandle,
+    path: Option<String>,
+) -> Result<AppConfig, StoreError> {
+    let mut config = load_config(app)?;
+    config.download_dir = clean_optional(path);
+    save_config(app, &config)?;
+    Ok(config)
+}
+
 pub fn upsert_account_inner(
     app: &AppHandle,
     mut profile: AccountProfile,
@@ -148,6 +194,72 @@ pub fn upsert_account_inner(
     Ok(config)
 }
 
+pub fn set_selected_account_inner(
+    app: &AppHandle,
+    id: Option<String>,
+) -> Result<AppConfig, StoreError> {
+    let mut config = load_config(app)?;
+    config.selected_account_id = id.filter(|value| {
+        config
+            .accounts
+            .iter()
+            .any(|account| account.id == value.as_str())
+    });
+    save_config(app, &config)?;
+    Ok(config)
+}
+
+pub fn mark_account_used_inner(app: &AppHandle, id: String) -> Result<AppConfig, StoreError> {
+    let mut config = load_config(app)?;
+    if let Some(account) = config.accounts.iter_mut().find(|item| item.id == id) {
+        account.last_used_at = Some(unix_timestamp_string());
+        config.selected_account_id = Some(account.id.clone());
+    }
+    save_config(app, &config)?;
+    Ok(config)
+}
+
+pub fn record_download_history_inner(
+    app: &AppHandle,
+    mut item: DownloadHistoryItem,
+) -> Result<AppConfig, StoreError> {
+    let mut config = load_config(app)?;
+    if item.id.trim().is_empty() {
+        item.id = Uuid::new_v4().to_string();
+    }
+    if item.downloaded_at.trim().is_empty() {
+        item.downloaded_at = unix_timestamp_string();
+    }
+    item.app_name = item.app_name.trim().to_string();
+    item.bundle_id = item.bundle_id.trim().to_string();
+    item.app_icon_url = clean_optional(item.app_icon_url);
+    item.version_name = clean_optional(item.version_name);
+    item.external_version_id = clean_optional(item.external_version_id);
+    item.account_id = clean_optional(item.account_id);
+    item.account_email = clean_optional(item.account_email).map(|email| email.to_lowercase());
+    item.output_path = clean_optional(item.output_path);
+
+    config.download_history.retain(|entry| entry.id != item.id);
+    config.download_history.insert(0, item);
+    config.download_history.truncate(200);
+    save_config(app, &config)?;
+    Ok(config)
+}
+
+pub fn delete_download_history_inner(app: &AppHandle, id: String) -> Result<AppConfig, StoreError> {
+    let mut config = load_config(app)?;
+    config.download_history.retain(|entry| entry.id != id);
+    save_config(app, &config)?;
+    Ok(config)
+}
+
+pub fn clear_download_history_inner(app: &AppHandle) -> Result<AppConfig, StoreError> {
+    let mut config = load_config(app)?;
+    config.download_history.clear();
+    save_config(app, &config)?;
+    Ok(config)
+}
+
 pub fn delete_account_inner(
     app: &AppHandle,
     id: String,
@@ -163,14 +275,14 @@ pub fn delete_account_inner(
                 .as_ref()
                 .ok()
                 .and_then(|out| out.json.get("email").and_then(|value| value.as_str()))
-                .map(|email| email.eq_ignore_ascii_case(&account.email))
+                .map(|email| emails_match(Some(email), &account.email))
                 .unwrap_or(false);
 
             if is_active {
-                run_json_command_inner(binary_path, &["auth", "revoke", "--format", "json"])
-                    .map(|out| out.diagnostic)
-                    .err()
-                    .and_then(|err| err.into_diagnostic())
+                match run_json_command_inner(binary_path, &["auth", "revoke", "--format", "json"]) {
+                    Ok(out) => Some(out.diagnostic),
+                    Err(err) => err.into_diagnostic(),
+                }
             } else {
                 None
             }
@@ -187,6 +299,35 @@ pub fn delete_account_inner(
     }
     save_config(app, &config)?;
     Ok((config, diagnostic))
+}
+
+pub fn emails_match(active_email: Option<&str>, profile_email: &str) -> bool {
+    active_email
+        .map(|email| email.trim().eq_ignore_ascii_case(profile_email.trim()))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+pub fn selected_profile_matches_auth(config: &AppConfig, auth: &AuthState) -> bool {
+    config
+        .selected_account_id
+        .as_ref()
+        .and_then(|id| config.accounts.iter().find(|account| account.id == *id))
+        .map(|account| emails_match(auth.email.as_deref(), &account.email))
+        .unwrap_or(false)
+}
+
+fn unix_timestamp_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]
@@ -210,5 +351,50 @@ mod tests {
         assert!(!data.contains("authCode"));
         assert!(!data.contains("token"));
         assert!(!data.contains("cookie"));
+    }
+
+    #[test]
+    fn emails_match_case_insensitively_and_trim_space() {
+        assert!(emails_match(Some(" User@Example.COM "), "user@example.com"));
+        assert!(!emails_match(Some("other@example.com"), "user@example.com"));
+        assert!(!emails_match(None, "user@example.com"));
+    }
+
+    #[test]
+    fn selected_profile_matching_uses_auth_email() {
+        let config = AppConfig {
+            binary_path: None,
+            selected_account_id: Some("account-a".to_string()),
+            download_dir: None,
+            accounts: vec![
+                AccountProfile {
+                    id: "account-a".to_string(),
+                    email: "a@example.com".to_string(),
+                    display_name: "A".to_string(),
+                    default_download_dir: "/tmp/a".to_string(),
+                    notes: String::new(),
+                    last_used_at: None,
+                },
+                AccountProfile {
+                    id: "account-b".to_string(),
+                    email: "b@example.com".to_string(),
+                    display_name: "B".to_string(),
+                    default_download_dir: "/tmp/b".to_string(),
+                    notes: String::new(),
+                    last_used_at: None,
+                },
+            ],
+            download_history: Vec::new(),
+        };
+        let auth = AuthState {
+            signed_in: true,
+            email: Some("A@EXAMPLE.COM".to_string()),
+            name: None,
+            country_code: None,
+            error: None,
+            diagnostic: None,
+        };
+
+        assert!(selected_profile_matches_auth(&config, &auth));
     }
 }

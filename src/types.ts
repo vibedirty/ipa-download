@@ -10,7 +10,22 @@ export type AccountProfile = {
 export type AppConfig = {
   binaryPath?: string | null;
   selectedAccountId?: string | null;
+  downloadDir?: string | null;
   accounts: AccountProfile[];
+  downloadHistory: DownloadHistoryItem[];
+};
+
+export type DownloadHistoryItem = {
+  id: string;
+  appName: string;
+  bundleId: string;
+  appIconUrl?: string | null;
+  versionName?: string | null;
+  externalVersionId?: string | null;
+  accountId?: string | null;
+  accountEmail?: string | null;
+  outputPath?: string | null;
+  downloadedAt: string;
 };
 
 export type CommandDiagnostic = {
@@ -33,6 +48,7 @@ export type AuthState = {
   signedIn: boolean;
   email?: string | null;
   name?: string | null;
+  countryCode?: string | null;
   error?: string | null;
   diagnostic?: CommandDiagnostic | null;
 };
@@ -45,6 +61,11 @@ export type AppState = {
 
 export type CommandOutput = {
   json: Record<string, unknown>;
+  diagnostic: CommandDiagnostic;
+};
+
+export type VersionMetadataOutput = {
+  versionName?: string | null;
   diagnostic: CommandDiagnostic;
 };
 
